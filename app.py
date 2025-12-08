@@ -1580,9 +1580,12 @@ def update_variant_and_prices(
 @st.cache_resource
 def _http_session() -> requests.Session:
     s = requests.Session()
+    # [UPDATED] Use a real browser User-Agent to avoid blocking by sites like Cattelan Italia
     s.headers.update({
-        "User-Agent": "Altossa/1.0 (+streamlit)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
     })
     return s
 
@@ -1912,18 +1915,37 @@ def start_global_image_warmup(df: pd.DataFrame, max_workers: int = 12) -> None:
 
 @st.cache_data(show_spinner=False, ttl=21600)  # 6 hours
 def fetch_image_from_page(url: str):
-    """Extract og:image (fast) using a shared HTTP session."""
+    """Extract og:image or distinct product image using a shared HTTP session."""
+    from urllib.parse import urljoin
     try:
-        html = _http_session().get(url, timeout=5).text
-        soup = BeautifulSoup(html, "html.parser")
-        og = soup.find("meta", property="og:image")
-        if og and og.get("content"):
-            return og["content"]
-        tag = soup.find("img", attrs={"js-preload": True})
-        if tag and tag.get("src"):
-            return tag["src"]
+        # [UPDATED] Robust fetch with absolute URL conversion
+        r = _http_session().get(url, timeout=8)
+        if not r.ok:
+            return None
+            
+        soup = BeautifulSoup(r.text, "html.parser")
+        
+        # Priority 1: OpenGraph
+        candidates = [
+            soup.find("meta", property="og:image"),
+            soup.find("meta", name="twitter:image"),
+            soup.find("link", rel="image_src"),
+        ]
+        
+        for c in candidates:
+            if c and c.get("content"):
+                return urljoin(url, c.get("content"))
+            if c and c.get("href"):
+                return urljoin(url, c.get("href"))
+
+        # Priority 2: Specific Cattelan/General fallback classes
+        # Some sites use specific classes for main product images
+        img = soup.find("img", class_=re.compile(r"product|hero|main|detail", re.I))
+        if img and img.get("src"):
+            return urljoin(url, img.get("src"))
+
     except Exception:
-        return None
+        pass
     return None
 
 @st.cache_data(show_spinner=False, ttl=21600)  # 6 hours
@@ -1941,12 +1963,16 @@ def _resolve_product_image(product_link: str, composition_link: str | None) -> O
             r = session.get(u, timeout=timeout, allow_redirects=True, stream=True)
             if not r.ok:
                 return None
+            
             # Some Drive endpoints serve octet-stream; accept both image/* and octet-stream
             ct = (r.headers.get("Content-Type") or "").lower()
-            if (ct.startswith("image/") or "octet-stream" in ct):
+            
+            # [UPDATED] Relaxed content-type check for restrictive servers
+            if (ct.startswith("image/") or "octet-stream" in ct or "application/binary" in ct):
                 # read at most ~5 MB to avoid runaway downloads
                 chunk = r.raw.read(5 * 1024 * 1024)
                 return chunk if chunk else None
+        
         except Exception:
             return None
         return None
