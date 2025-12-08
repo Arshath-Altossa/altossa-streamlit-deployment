@@ -1,0 +1,6 @@
+.env
+*.sqlite3
+.image_cache.sqlite3
+.altossa_attachments/
+__pycache__/
+*.pyc

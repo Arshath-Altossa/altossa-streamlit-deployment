@@ -1,0 +1,14 @@
+streamlit
+pandas
+requests
+beautifulsoup4
+python-dotenv
+sqlalchemy
+psycopg2-binary
+bcrypt
+reportlab
+pypdf
+python-pptx
+xlsxwriter
+pillow
+openpyxl
