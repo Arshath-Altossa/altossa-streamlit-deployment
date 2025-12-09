@@ -3565,44 +3565,6 @@ def _get_safe_pdf_image_bytes(item: dict) -> Optional[bytes]:
     p_link = nz_str(item.get("Link"))
     
     # Priority 1: Check session cache for actual BYTES
-    for link_tuple in [("", c_link), (p_link, "")]:
-        pl, cl = link_tuple
-        if not pl and not cl: continue
-        
-        key = _img_key(pl, cl)
-        cached = st.session_state.get("img_cache", {}).get(key)
-        
-        # If we have bytes, use them immediately
-        if isinstance(cached, bytes):
-            return cached
-
-    # Priority 2: Force fetch with browser headers (ReportLab needs bytes, not URLs)
-    target_url = c_link or p_link
-    if target_url:
-        try:
-            # Mimic a real browser to avoid 403 Forbidden from brands like Cattelan/Ditre
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            r = requests.get(target_url, headers=headers, timeout=5)
-            if r.ok:
-                return r.content
-        except Exception:
-            pass
-            
-    return None
-
-def _get_safe_pdf_image_bytes(item: dict) -> Optional[bytes]:
-    """
-    Robust image retrieval for PDF generation (server-side).
-    1. Checks in-memory session cache for existing bytes (fastest).
-    2. If missing or cache is a URL string (client-side only), forces a fresh
-       requests.get() with browser headers to bypass CDN blocking on Streamlit Cloud.
-    """
-    c_link = nz_str(item.get("Composition link"))
-    p_link = nz_str(item.get("Link"))
-    
-    # Priority 1: Check session cache for actual BYTES
     # (e.g. Google Drive images stored as bytes)
     for link_tuple in [("", c_link), (p_link, "")]:
         pl, cl = link_tuple
