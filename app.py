@@ -392,21 +392,36 @@ def _excel_bytes_from_df(df: pd.DataFrame) -> bytes:
             _set_col_width("Composition Image", 24.0)
 
             # Helper to place a scaled thumbnail that fits within ~150×110 px cell box
-            def _insert_thumb(r_idx_1based: int, c_idx_0based: int, img_bytes: Optional[bytes]) -> None:
-                if not img_bytes:
+            def _insert_thumb(r_idx_1based: int, c_idx_0based: int, img_data: Any) -> None:
+                if not img_data:
                     return
+                
+                final_bytes = None
+                
+                # If URL string, try one-time fetch for export
+                if isinstance(img_data, str):
+                    try:
+                        # Best effort fetch for export
+                        r = requests.get(img_data, timeout=3, headers={"User-Agent": "Mozilla/5.0"})
+                        if r.ok: final_bytes = r.content
+                    except:
+                        pass
+                elif isinstance(img_data, bytes):
+                    final_bytes = img_data
+                
+                if not final_bytes:
+                    return
+
                 try:
-                    # set row height tall enough for thumbnails (in points; ~1pt = 1/72")
                     ws.set_row(r_idx_1based - 1, 110)
                     ws.insert_image(
                         r_idx_1based - 1,
                         c_idx_0based,
                         "ignored.png",
                         {
-                            "image_data": BytesIO(img_bytes),
+                            "image_data": BytesIO(final_bytes),
                             "x_offset": 2,
                             "y_offset": 2,
-                            # scale chosen to fit comfortably in the 24-char column and 110pt row
                             "x_scale": 0.55,
                             "y_scale": 0.55,
                         },
@@ -640,21 +655,35 @@ def _pdf_bytes_from_df(df: pd.DataFrame, client_name: str = "", approved_by: str
             img = get_image_if_cached(prod_link, "") or get_image_cached(prod_link, "")
         return img
 
-    def _scaled_image_flowable(img_bytes: Optional[bytes]) -> Any:
+    def _scaled_image_flowable(img_data: Any) -> Any:
         """
         Return an Image scaled to *fit* the fixed image-box (IMG_CELL_W × IMG_CELL_H).
-        This guarantees no overflow and no cropping.
+        Handles bytes or URL string (by attempting fetch).
         """
-        if not img_bytes:
+        if not img_data:
             return ""
+        
+        final_bytes = None
+        if isinstance(img_data, str):
+            try:
+                # One-time fetch for PDF generation
+                r = requests.get(img_data, timeout=3, headers={"User-Agent": "Mozilla/5.0"})
+                if r.ok: final_bytes = r.content
+            except: pass
+        else:
+            final_bytes = img_data
+
+        if not final_bytes:
+            return ""
+
         try:
-            rdr = ImageReader(BytesIO(img_bytes))
+            rdr = ImageReader(BytesIO(final_bytes))
             iw, ih = rdr.getSize()
             if iw <= 0 or ih <= 0:
                 return ""
             scale = min(IMG_CELL_W / float(iw), IMG_CELL_H / float(ih))
             w, h = iw * scale, ih * scale
-            return Image(BytesIO(img_bytes), width=w, height=h)  # already fitted, no KeepInFrame needed
+            return Image(BytesIO(final_bytes), width=w, height=h)
         except Exception:
             return ""
 
@@ -802,7 +831,8 @@ def _ppt_bytes_from_cart(cart: list[dict], client_name: str = "") -> bytes | Non
         qty = int(it.get("qty", 1) or 1)
         return unit, (int(unit) * qty if unit is not None else 0)
 
-    def _img_bytes_for_item(it: dict) -> bytes | None:
+    def _img_data_for_item(it: dict) -> Any:
+        # Returns bytes OR string URL
         comp = (it.get("Composition link") or "").strip()
         link = (it.get("Link") or "").strip()
         img = None
@@ -827,11 +857,21 @@ def _ppt_bytes_from_cart(cart: list[dict], client_name: str = "") -> bytes | Non
         p = tf.paragraphs[0]; p.text = title; p.font.size = Pt(28); p.font.bold = True
 
         # Left: main image (height-first fit)
-        img = _img_bytes_for_item(it)
-        if img:
+        img_data = _img_data_for_item(it)
+        
+        final_bytes = None
+        if isinstance(img_data, str):
+            try:
+                r = requests.get(img_data, timeout=3, headers={"User-Agent": "Mozilla/5.0"})
+                if r.ok: final_bytes = r.content
+            except: pass
+        elif isinstance(img_data, bytes):
+            final_bytes = img_data
+
+        if final_bytes:
             from io import BytesIO
             try:
-                sld.shapes.add_picture(BytesIO(img), Inches(0.5), Inches(1.2), height=Inches(4.6))
+                sld.shapes.add_picture(BytesIO(final_bytes), Inches(0.5), Inches(1.2), height=Inches(4.6))
             except Exception:
                 pass
 
@@ -1927,12 +1967,11 @@ def fetch_image_from_page(url: str):
     return None
 
 @st.cache_data(show_spinner=False, ttl=21600)  # 6 hours
-def _resolve_product_image(product_link: str, composition_link: str | None) -> Optional[bytes]:
+def _resolve_product_image(product_link: str, composition_link: str | None) -> Any:
     """
-    Return raw image bytes ready for st.image(...).
-    Preference:
-      1) og:image from product_link (hero)
-      2) composition_link (Drive-optimized sequence)
+    Return image SOURCE for st.image(...).
+    - If Composition Link: Returns bytes (downloaded server-side).
+    - If Product Link: Returns URL string (client-side load) to avoid server blocking.
     """
     session = _http_session()
 
@@ -1941,31 +1980,30 @@ def _resolve_product_image(product_link: str, composition_link: str | None) -> O
             r = session.get(u, timeout=timeout, allow_redirects=True, stream=True)
             if not r.ok:
                 return None
-            # Some Drive endpoints serve octet-stream; accept both image/* and octet-stream
             ct = (r.headers.get("Content-Type") or "").lower()
-            if (ct.startswith("image/") or "octet-stream" in ct):
-                # read at most ~5 MB to avoid runaway downloads
+            if (ct.startswith("image/") or "octet-stream" in ct or "application/binary" in ct):
                 chunk = r.raw.read(5 * 1024 * 1024)
                 return chunk if chunk else None
         except Exception:
             return None
         return None
 
-    # 1) Try product hero
-    if product_link:
-        og = fetch_image_from_page(product_link)
-        if og:
-            b = _get_bytes(og, timeout=6.0)
-            if b:
-                return b
-
-    # 2) Fallback to composition link (Drive candidates first)
+    # 1. Composition Link (Internal/Drive) -> Prefer BYTES (Server fetch)
+    # We fetch these because Drive links often require redirect handling 
+    # that simple <img src> tags handle poorly without auth context.
     comp = (composition_link or "").strip()
     if comp:
         for cand in _drive_candidates(comp, size=1600):
             b = _get_bytes(cand, timeout=6.0)
             if b:
                 return b
+
+    # 2. Product Link (Brand Site) -> Prefer URL STRING (Browser fetch)
+    # We scrape the URL but do NOT download it, preventing 403 Forbidden on the server.
+    if product_link:
+        og_url = fetch_image_from_page(product_link)
+        if og_url:
+            return og_url  # Return string directly for st.image
 
     return None
 
@@ -2065,31 +2103,31 @@ def first_product_links_for_type(df: pd.DataFrame, type_name: str) -> tuple[str,
 
 def render_type_tile(ptype: str, product_link: str, composition_link: str, key: str) -> None:
     """
-    Render a 3:2 tile for a Product type.
-
-    • Image source is EXACTLY the same as the first product card inside that type:
-      get_image_cached(product_link, composition_link).
-    • The tile is purely visual; navigation happens via a small "View" button
-      rendered just below the tile, which calls open_product_type(ptype) and
-      keeps us inside the same Streamlit session (no password prompt).
-    • The product type name is ALWAYS visible (no hover needed).
+    Render a 3:2 tile. Handles both bytes (base64) and URL strings.
     """
     import base64, re, uuid
 
-    # Try to fetch bytes using the same logic as product cards
     data_uri = ""
     if product_link or composition_link:
-        b = (
+        # returns bytes OR string
+        img_data = (
             get_image_if_cached(product_link, composition_link)
             or get_image_cached(product_link, composition_link)
         )
-        if b:
-            try:
-                data_uri = "data:image/*;base64," + base64.b64encode(b).decode("ascii")
-            except Exception:
-                data_uri = ""
+        
+        if img_data:
+            if isinstance(img_data, str):
+                # It's a URL (Cattelan/Brand site) -> Use directly
+                data_uri = img_data
+            elif isinstance(img_data, bytes):
+                # It's bytes (Drive) -> Base64 encode
+                try:
+                    data_uri = "data:image/*;base64," + base64.b64encode(img_data).decode("ascii")
+                except Exception:
+                    data_uri = ""
 
     safe_key = re.sub(r"[^a-zA-Z0-9_-]+", "", key) or ("k" + uuid.uuid4().hex[:6])
+    # ... rest of function stays exactly the same ...
     cls = f"tile_{safe_key}"
 
     style_bg = (
