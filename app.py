@@ -1912,47 +1912,18 @@ def start_global_image_warmup(df: pd.DataFrame, max_workers: int = 12) -> None:
 
 @st.cache_data(show_spinner=False, ttl=21600)  # 6 hours
 def fetch_image_from_page(url: str):
-    """Extract og:image or distinct product image using a shared HTTP session."""
-    from urllib.parse import urljoin
+    """Extract og:image (fast) using a shared HTTP session."""
     try:
-        # [UPDATED] Robust fetch with absolute URL conversion
-        r = _http_session().get(url, timeout=8)
-        if not r.ok:
-            return None
-            
-        soup = BeautifulSoup(r.text, "html.parser")
-        
-        # [NEW] Cattelan Italia specific handler
-        # Targets the specific slider structure used on their product pages
-        if "cattelanitalia.com" in url.lower():
-            # Use CSS selector to find the landscape image wrapper and the slide image inside it
-            cattelan_img = soup.select_one("div.image-wrapper.landscape img.background-slide")
-            if cattelan_img:
-                # Prefer data-src (often used for lazy loading high-res), fallback to src
-                img_url = cattelan_img.get("data-src") or cattelan_img.get("src")
-                if img_url:
-                    return urljoin(url, img_url)
-
-        # Priority 1: OpenGraph (Standard for most other sites)
-        candidates = [
-            soup.find("meta", property="og:image"),
-            soup.find("meta", name="twitter:image"),
-            soup.find("link", rel="image_src"),
-        ]
-        
-        for c in candidates:
-            if c and c.get("content"):
-                return urljoin(url, c.get("content"))
-            if c and c.get("href"):
-                return urljoin(url, c.get("href"))
-
-        # Priority 2: Generic fallback classes (Hero/Main/Product)
-        img = soup.find("img", class_=re.compile(r"product|hero|main|detail", re.I))
-        if img and img.get("src"):
-            return urljoin(url, img.get("src"))
-
+        html = _http_session().get(url, timeout=5).text
+        soup = BeautifulSoup(html, "html.parser")
+        og = soup.find("meta", property="og:image")
+        if og and og.get("content"):
+            return og["content"]
+        tag = soup.find("img", attrs={"js-preload": True})
+        if tag and tag.get("src"):
+            return tag["src"]
     except Exception:
-        pass
+        return None
     return None
 
 @st.cache_data(show_spinner=False, ttl=21600)  # 6 hours
