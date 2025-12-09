@@ -3554,6 +3554,44 @@ def _get_item_pdf_data(item: dict, visual_role: str) -> list[list[str]]:
         ["Price", ":", price_val],
     ]
 
+def _get_safe_pdf_image_bytes(item: dict) -> Optional[bytes]:
+    """
+    Robust image retrieval for PDF generation (server-side).
+    1. Checks in-memory session cache for existing bytes (fastest).
+    2. If missing or cache is a URL string (client-side only), forces a fresh
+       requests.get() with browser headers to bypass CDN blocking on Streamlit Cloud.
+    """
+    c_link = nz_str(item.get("Composition link"))
+    p_link = nz_str(item.get("Link"))
+    
+    # Priority 1: Check session cache for actual BYTES
+    for link_tuple in [("", c_link), (p_link, "")]:
+        pl, cl = link_tuple
+        if not pl and not cl: continue
+        
+        key = _img_key(pl, cl)
+        cached = st.session_state.get("img_cache", {}).get(key)
+        
+        # If we have bytes, use them immediately
+        if isinstance(cached, bytes):
+            return cached
+
+    # Priority 2: Force fetch with browser headers (ReportLab needs bytes, not URLs)
+    target_url = c_link or p_link
+    if target_url:
+        try:
+            # Mimic a real browser to avoid 403 Forbidden from brands like Cattelan/Ditre
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            r = requests.get(target_url, headers=headers, timeout=5)
+            if r.ok:
+                return r.content
+        except Exception:
+            pass
+            
+    return None
+
 def export_drawing_room_pdf(cart: list[dict], client_name: str = "", approved_by: str = "") -> Optional[bytes]:
     """
     Generates a Drawing Room visual layout PDF.
@@ -3585,12 +3623,8 @@ def export_drawing_room_pdf(cart: list[dict], client_name: str = "", approved_by
     
     # --- Helpers ---
     def _get_img_bytes(item):
-        c = nz_str(item.get("Composition link"))
-        l = nz_str(item.get("Link"))
-        img = None
-        if c: img = get_image_if_cached("", c) or get_image_cached("", c)
-        if not img and l: img = get_image_if_cached(l, "") or get_image_cached(l, "")
-        return img
+        # [UPDATED] Use robust helper to ensure bytes are returned even if cached as URL
+        return _get_safe_pdf_image_bytes(item)
 
     def _draw_elbow_line(canvas, start_x, start_y, box_x, box_y, box_w, box_h, align):
         canvas.saveState()
@@ -3905,12 +3939,8 @@ def export_living_room_pdf(cart: list[dict], client_name: str = "", approved_by:
     
     # --- Helpers ---
     def _get_img_bytes(item):
-        c = nz_str(item.get("Composition link"))
-        l = nz_str(item.get("Link"))
-        img = None
-        if c: img = get_image_if_cached("", c) or get_image_cached("", c)
-        if not img and l: img = get_image_if_cached(l, "") or get_image_cached(l, "")
-        return img
+        # [UPDATED] Use robust helper to ensure bytes are returned even if cached as URL
+        return _get_safe_pdf_image_bytes(item)
 
     def _draw_elbow_line(canvas, start_x, start_y, box_x, box_y, box_w, box_h, align):
         canvas.saveState()
@@ -4199,12 +4229,8 @@ def export_bedroom_pdf(cart: list[dict], room_key: str, client_name: str = "", a
     
     # --- Helpers ---
     def _get_img_bytes(item):
-        c = nz_str(item.get("Composition link"))
-        l = nz_str(item.get("Link"))
-        img = None
-        if c: img = get_image_if_cached("", c) or get_image_cached("", c)
-        if not img and l: img = get_image_if_cached(l, "") or get_image_cached(l, "")
-        return img
+        # [UPDATED] Use robust helper to ensure bytes are returned even if cached as URL
+        return _get_safe_pdf_image_bytes(item)
 
     def _draw_elbow_line(canvas, start_x, start_y, box_x, box_y, box_w, box_h, align):
         canvas.saveState()
@@ -4434,12 +4460,8 @@ def export_dining_room_pdf(cart: list[dict], client_name: str = "", approved_by:
     
     # --- Helpers ---
     def _get_img_bytes(item):
-        c = nz_str(item.get("Composition link"))
-        l = nz_str(item.get("Link"))
-        img = None
-        if c: img = get_image_if_cached("", c) or get_image_cached("", c)
-        if not img and l: img = get_image_if_cached(l, "") or get_image_cached(l, "")
-        return img
+        # [UPDATED] Use robust helper to ensure bytes are returned even if cached as URL
+        return _get_safe_pdf_image_bytes(item)
 
     def _draw_elbow_line(canvas, start_x, start_y, box_x, box_y, box_w, box_h, align):
         canvas.saveState()
@@ -4663,12 +4685,8 @@ def export_others_room_pdf(cart: list[dict], client_name: str = "", approved_by:
     
     # --- Helpers ---
     def _get_img_bytes(item):
-        c = nz_str(item.get("Composition link"))
-        l = nz_str(item.get("Link"))
-        img = None
-        if c: img = get_image_if_cached("", c) or get_image_cached("", c)
-        if not img and l: img = get_image_if_cached(l, "") or get_image_cached(l, "")
-        return img
+        # [UPDATED] Use robust helper to ensure bytes are returned even if cached as URL
+        return _get_safe_pdf_image_bytes(item)
 
     def draw_border_and_header(canvas, doc):
         canvas.saveState()
@@ -4861,6 +4879,7 @@ def export_all_rooms_pdf(cart: list[dict], client_name: str = "", approved_by: s
     """
     Generates a single merged PDF containing visual layouts for ALL rooms that have items.
     Order: Drawing Room -> Living Room -> Dining Room -> Bedrooms (1-3) -> Others.
+    [UPDATED] Skips rooms with 0 allocated items.
     """
     try:
         from pypdf import PdfWriter, PdfReader
@@ -4872,19 +4891,41 @@ def export_all_rooms_pdf(cart: list[dict], client_name: str = "", approved_by: s
     writer = PdfWriter()
     has_pages = False
 
-    # Define export sequence
-    # (Function, Room Key/Arg)
+    # Helper to check if a room has any quantity in the cart
+    def _has_items_for_room(room_key: str) -> bool:
+        if room_key == "Others":
+            # Others is special: check explicit 'Others' OR unassigned remainder
+            for it in cart:
+                raw = it.get("room_alloc", {})
+                if _room_qty(raw.get("Others")) > 0: return True
+                # Check remainder
+                total = int(it.get("qty", 1))
+                assigned = sum(_room_qty(v) for k,v in raw.items() if k != "Others")
+                if total - assigned > 0: return True
+            return False
+        else:
+            # Standard room check
+            for it in cart:
+                raw = it.get("room_alloc", {})
+                if _room_qty(raw.get(room_key)) > 0: return True
+            return False
+
+    # Define export sequence: (Function, Room Key Arg, Room Name Check)
     tasks = [
-        (export_drawing_room_pdf, None),
-        (export_living_room_pdf, None),
-        (export_dining_room_pdf, None),
-        (export_bedroom_pdf, "Bedroom 1"),
-        (export_bedroom_pdf, "Bedroom 2"),
-        (export_bedroom_pdf, "Bedroom 3"),
-        (export_others_room_pdf, None),
+        (export_drawing_room_pdf, None, "Drawing Room"),
+        (export_living_room_pdf, None, "Living Room"),
+        (export_dining_room_pdf, None, "Dining Room"),
+        (export_bedroom_pdf, "Bedroom 1", "Bedroom 1"),
+        (export_bedroom_pdf, "Bedroom 2", "Bedroom 2"),
+        (export_bedroom_pdf, "Bedroom 3", "Bedroom 3"),
+        (export_others_room_pdf, None, "Others"),
     ]
 
-    for func, arg in tasks:
+    for func, arg, room_name in tasks:
+        # [UPDATED] Skip generation if room is empty
+        if not _has_items_for_room(room_name):
+            continue
+
         try:
             if arg:
                 pdf_bytes = func(cart, arg, client_name, approved_by)
