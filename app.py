@@ -827,9 +827,10 @@ def _ppt_bytes_from_cart(cart: list[dict], client_name: str = "") -> bytes | Non
         return None
 
     def _unit_and_subtotal(it: dict) -> tuple[int | None, int]:
-        unit = calculate_final_price(it.get("Brand", ""), it.get("Base Price"))
+        # [UPDATED] Use centralized helper to respect manual price overrides
+        unit = int(_get_item_price(it))
         qty = int(it.get("qty", 1) or 1)
-        return unit, (int(unit) * qty if unit is not None else 0)
+        return unit, (unit * qty)
 
     def _img_data_for_item(it: dict) -> Any:
         # Returns bytes OR string URL
@@ -2788,6 +2789,52 @@ def _ensure_uploader_cleared(uploader_key: str) -> None:
         st.session_state.pop(flag_key, None)
         st.session_state.pop(uploader_key, None)
 
+def _render_stateful_export_buttons(label: str, key_prefix: str, gen_func, filename: str, mime: str, enabled: bool, *args) -> None:
+    """
+    Renders a 'Generate' button and a 'Download' button side-by-side.
+    - Generate: Runs heavy function, stores bytes in session_state, reruns app.
+    - Download: Pure download button, reads from session_state, instant & no-reload.
+    """
+    # Unique keys for state
+    k_bytes = f"{key_prefix}_bytes"
+    k_ready = f"{key_prefix}_ready"
+
+    c1, c2 = st.columns([0.45, 0.55])
+    
+    # 1. GENERATE BUTTON
+    with c1:
+        # If inputs change (e.g. cart modified), user must re-click generate.
+        # We don't auto-clear state here to avoid flicker, but you could if strict sync is needed.
+        if st.button(f"Generate {label}", key=f"btn_gen_{key_prefix}", disabled=not enabled, use_container_width=True):
+            with st.spinner(f"Generating {label}..."):
+                try:
+                    data = gen_func(*args)
+                    if data:
+                        st.session_state[k_bytes] = data
+                        st.session_state[k_ready] = True
+                        st.rerun() # Force UI update to enable download button
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # 2. DOWNLOAD BUTTON
+    with c2:
+        file_data = st.session_state.get(k_bytes)
+        is_ready = st.session_state.get(k_ready, False)
+        
+        if is_ready and file_data:
+            st.download_button(
+                label=f"⬇ {label}",
+                data=file_data,
+                file_name=filename,
+                mime=mime,
+                key=f"btn_dl_{key_prefix}",
+                use_container_width=True,
+                type="primary"
+            )
+        else:
+            # Disabled placeholder until generated
+            st.button(f"⬇ {label}", disabled=True, key=f"btn_dis_{key_prefix}", use_container_width=True)
+
 # ---------------------------
 # Data (PostgreSQL)
 # ---------------------------
@@ -3272,6 +3319,10 @@ with st.sidebar:
     st.metric("Grand Total", f"₹{total:,}")
 
     # --- Client name (required for exports) ---
+    # [UPDATED] Initialize with session state to persist value across reruns (like exports)
+    if "client_name_sidebar" not in st.session_state: st.session_state.client_name_sidebar = ""
+    if "approved_by_sidebar" not in st.session_state: st.session_state.approved_by_sidebar = ""
+
     client_name = st.text_input("Client name", key="client_name_sidebar")
     approved_by = st.text_input("Approved by (team member)", key="approved_by_sidebar")
 
@@ -3298,62 +3349,43 @@ with st.sidebar:
     )
 
     # [UPDATED] Export Menu Dropdown
-    # We replace the static "### Export" header with a collapsible menu
     with st.expander("Export", expanded=False):
+        if not allow_export:
+            st.caption("Enter Client Name and add items to enable exports.")
         
-        # Excel
-        if allow_export:
-            xlsx_bytes = _excel_bytes_from_df(export_df)
-            st.download_button(
-                "⬇ Excel",
-                data=xlsx_bytes,
-                file_name="altossa_selection.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch",
-            )
-        else:
-            st.button("⬇ Excel", disabled=True, width="stretch")
+        # 1. EXCEL (Stateful)
+        _render_stateful_export_buttons(
+            "Excel", "sidebar_excel", 
+            _excel_bytes_from_df, 
+            "altossa_selection.xlsx", 
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            allow_export, 
+            export_df
+        )
 
-        # PDF
-        if allow_export:
-            pdf_bytes = _pdf_bytes_from_df(
-                export_df,
-                client_name=client_name.strip(),
-                approved_by=approved_by.strip(),
-            )
-            if pdf_bytes is not None:
-                st.download_button(
-                    "⬇ PDF",
-                    data=pdf_bytes,
-                    file_name="altossa_selection.pdf",
-                    mime="application/pdf",
-                    width="stretch",
-                )
-            else:
-                st.info("Install `reportlab` to enable PDF export: pip install reportlab")
-                st.button("⬇ PDF", disabled=True, width="stretch")
-        else:
-            st.button("⬇ PDF", disabled=True, width="stretch")
+        st.markdown("---")
 
-        # PPT
-        if allow_export:
-            ppt_bytes = _ppt_bytes_from_cart(
-                st.session_state.cart,
-                client_name=client_name.strip(),
-            )
-            if ppt_bytes is not None:
-                st.download_button(
-                    "⬇ PPT (internal)",
-                    data=ppt_bytes,
-                    file_name="altossa_internal_notes.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    width="stretch",
-                )
-            else:
-                st.info("Install `python-pptx` to enable PPT export: pip install python-pptx")
-                st.button("⬇ PPT (internal)", disabled=True, width="stretch")
-        else:
-            st.button("⬇ PPT (internal)", disabled=True, width="stretch")
+        # 2. PDF (Stateful - Sidebar Version)
+        _render_stateful_export_buttons(
+            "PDF", "sidebar_pdf",
+            _pdf_bytes_from_df,
+            "altossa_selection.pdf",
+            "application/pdf",
+            allow_export,
+            export_df, client_name.strip(), approved_by.strip()
+        )
+
+        st.markdown("---")
+
+        # 3. PPT (Stateful - Internal Version)
+        _render_stateful_export_buttons(
+            "PPT (Int)", "sidebar_ppt",
+            _ppt_bytes_from_cart,
+            "altossa_internal_notes.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            allow_export,
+            st.session_state.cart, client_name.strip()
+        )
 
     # --- NEW: autosave selection & header info to disk so it survives sleep/restarts
     _autosave_cart_if_changed()
@@ -6427,7 +6459,8 @@ elif st.session_state.page == "review":
                         if it.get("W"): specs.append(f"{it['W']}x{it['D']}x{it['H']}")
                         if it.get("Material"): specs.append(it['Material'])
                         if specs:
-                            st.caption(" · ".join(specs))
+                            st.caption(" · ".join
+(specs))
 
                         # Line 3: Room & Visual Role
                         rooms_txt = _room_allocation_text(it)
@@ -6598,18 +6631,17 @@ elif st.session_state.page == "review":
             st.metric("GRAND TOTAL", f"₹ {grand_total:,.0f}")
             
             if client_name:
-                inv_pdf = export_pro_forma_invoice_pdf(cart, client_name, approved_by)
-                if inv_pdf:
-                    st.download_button(
-                        "📄 Download Invoice PDF", 
-                        data=inv_pdf, 
-                        file_name=f"Invoice_{client_name}_{datetime.now().strftime('%Y%m%d')}.pdf", 
-                        mime="application/pdf", 
-                        use_container_width=True,
-                        type="primary"
-                    )
+                # [UPDATED] Stateful Invoice Generation
+                _render_stateful_export_buttons(
+                    "Invoice PDF", "proforma_invoice",
+                    export_pro_forma_invoice_pdf,
+                    f"Invoice_{client_name}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    "application/pdf",
+                    True, # Enabled since client_name check passed
+                    cart, client_name, approved_by
+                )
             else:
-                st.warning("Enter Client Name above to download Invoice PDF.")
+                st.warning("Enter Client Name above to enable Invoice generation.")
 
     # --- Footer Navigation ---
     st.divider()
