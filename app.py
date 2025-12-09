@@ -3592,6 +3592,60 @@ def _get_safe_pdf_image_bytes(item: dict) -> Optional[bytes]:
             
     return None
 
+def _get_safe_pdf_image_bytes(item: dict) -> Optional[bytes]:
+    """
+    Robust image retrieval for PDF generation (server-side).
+    1. Checks in-memory session cache for existing bytes (fastest).
+    2. If missing or cache is a URL string (client-side only), forces a fresh
+       requests.get() with browser headers to bypass CDN blocking on Streamlit Cloud.
+    """
+    c_link = nz_str(item.get("Composition link"))
+    p_link = nz_str(item.get("Link"))
+    
+    # Priority 1: Check session cache for actual BYTES
+    # (e.g. Google Drive images stored as bytes)
+    for link_tuple in [("", c_link), (p_link, "")]:
+        pl, cl = link_tuple
+        if not pl and not cl: continue
+        
+        key = _img_key(pl, cl)
+        # We access the session cache directly to see if bytes are already there
+        if "img_cache" in st.session_state:
+            cached = st.session_state.img_cache.get(key)
+            if isinstance(cached, bytes):
+                return cached
+
+    # Priority 2: Force fetch with browser headers (ReportLab needs bytes, not URLs)
+    # If the cache contained a URL string (for client-side display), we must now download it.
+    target_url = c_link or p_link
+    if target_url:
+        try:
+            # Mimic a real browser to avoid 403 Forbidden from brands like Cattelan/Ditre
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            # Attempt to resolve the true image URL first (in case it's a product page)
+            # or use the link directly if it looks like an image
+            
+            # If we already resolved a direct image URL in the cache, use that.
+            key = _img_key(p_link, c_link)
+            cached_url = st.session_state.get("img_cache", {}).get(key)
+            
+            url_to_fetch = cached_url if isinstance(cached_url, str) and cached_url.startswith("http") else target_url
+            
+            # If it's a product page URL, we might need to scrape it again if we don't have the cached direct link
+            if "cattelan" in url_to_fetch.lower() or "ditre" in url_to_fetch.lower():
+                 scraped = fetch_image_from_page(url_to_fetch)
+                 if scraped: url_to_fetch = scraped
+
+            r = requests.get(url_to_fetch, headers=headers, timeout=5)
+            if r.ok:
+                return r.content
+        except Exception:
+            pass
+            
+    return None
+
 def export_drawing_room_pdf(cart: list[dict], client_name: str = "", approved_by: str = "") -> Optional[bytes]:
     """
     Generates a Drawing Room visual layout PDF.
